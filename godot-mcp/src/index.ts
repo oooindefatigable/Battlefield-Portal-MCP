@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 /**
- * Godot MCP Server
+ * Battlefield Portal MCP Server
  *
- * This MCP server provides tools for interacting with the Godot game engine.
- * It enables AI assistants to launch the Godot editor, run Godot projects,
- * capture debug output, and control project execution.
+ * This MCP server provides tools for interacting with the Battlefield Portal SDK
+ * in addition to general Godot engine automation. It enables AI assistants to
+ * launch the Godot editor, run projects, export Portal spatial data, inspect SDK
+ * resources, and orchestrate project generation workflows.
  */
 
 import { fileURLToPath } from 'url';
 import { join, dirname, basename, normalize } from 'path';
-import { existsSync, readdirSync, mkdirSync } from 'fs';
-import { spawn } from 'child_process';
+import { existsSync, readdirSync, mkdirSync, readFileSync } from 'fs';
+import { spawn, execFile, exec } from 'child_process';
 import { promisify } from 'util';
-import { exec } from 'child_process';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -28,6 +28,7 @@ const DEBUG_MODE: boolean = process.env.DEBUG === 'true';
 const GODOT_DEBUG_MODE: boolean = true; // Always use GODOT DEBUG MODE
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // Derive __filename and __dirname in ESM
 const __filename = fileURLToPath(import.meta.url);
@@ -50,6 +51,10 @@ interface GodotServerConfig {
   debugMode?: boolean;
   godotDebugMode?: boolean;
   strictPathValidation?: boolean; // New option to control path validation behavior
+  portalSdkPath?: string;
+  portalProjectPath?: string;
+  fbExportDataPath?: string;
+  pythonPath?: string;
 }
 
 /**
@@ -69,6 +74,11 @@ class GodotServer {
   private operationsScriptPath: string;
   private validatedPaths: Map<string, boolean> = new Map();
   private strictPathValidation: boolean = false;
+  private portalSdkPath: string | null = null;
+  private portalProjectPath: string | null = null;
+  private fbExportDataPath: string | null = null;
+  private pythonCommand: string | null = null;
+  private initialConfig?: GodotServerConfig;
 
   /**
    * Parameter name mappings between snake_case and camelCase
@@ -99,6 +109,7 @@ class GodotServer {
   private reverseParameterMappings: Record<string, string> = {};
 
   constructor(config?: GodotServerConfig) {
+    this.initialConfig = config;
     // Initialize reverse parameter mappings
     for (const [snakeCase, camelCase] of Object.entries(this.parameterMappings)) {
       this.reverseParameterMappings[camelCase] = snakeCase;
@@ -130,7 +141,26 @@ class GodotServer {
           this.godotPath = null; // Reset to trigger auto-detection later
         }
       }
+      if (config.portalSdkPath) {
+        this.portalSdkPath = normalize(config.portalSdkPath);
+        this.logDebug(`Custom Portal SDK path provided: ${this.portalSdkPath}`);
+      }
+      if (config.portalProjectPath) {
+        this.portalProjectPath = normalize(config.portalProjectPath);
+        this.logDebug(`Custom Portal project path provided: ${this.portalProjectPath}`);
+      }
+      if (config.fbExportDataPath) {
+        this.fbExportDataPath = normalize(config.fbExportDataPath);
+        this.logDebug(`Custom Portal FbExportData path provided: ${this.fbExportDataPath}`);
+      }
+      if (config.pythonPath) {
+        this.pythonCommand = config.pythonPath;
+        this.logDebug(`Custom Python command provided: ${this.pythonCommand}`);
+      }
     }
+
+    // Attempt to resolve Portal SDK paths immediately so defaults are available
+    this.detectPortalPaths();
 
     // Set the path to the operations script
     this.operationsScriptPath = join(__dirname, 'scripts', 'godot_operations.gd');
@@ -139,8 +169,8 @@ class GodotServer {
     // Initialize the MCP server
     this.server = new Server(
       {
-        name: 'godot-mcp',
-        version: '0.1.0',
+        name: 'bfportal-mcp',
+        version: '0.2.0',
       },
       {
         capabilities: {
@@ -215,6 +245,37 @@ class GodotServer {
   }
 
   /**
+   * Determine if a path is absolute, supporting both POSIX and Windows formats
+   */
+  private isAbsolutePath(path: string): boolean {
+    if (!path) {
+      return false;
+    }
+
+    return path.startsWith('/') || path.startsWith('res://') || /^[A-Za-z]:[\\/]/.test(path);
+  }
+
+  /**
+   * Convert a path to an absolute path using a base directory
+   */
+  private toAbsolutePath(basePath: string, targetPath: string): string {
+    if (!targetPath) {
+      return targetPath;
+    }
+
+    if (targetPath.startsWith('res://')) {
+      const relativePath = targetPath.replace('res://', '');
+      return normalize(join(basePath, relativePath));
+    }
+
+    if (this.isAbsolutePath(targetPath)) {
+      return normalize(targetPath);
+    }
+
+    return normalize(join(basePath, targetPath));
+  }
+
+  /**
    * Synchronous validation for constructor use
    * This is a quick check that only verifies file existence, not executable validity
    * Full validation will be performed later in detectGodotPath
@@ -262,6 +323,321 @@ class GodotServer {
       this.validatedPaths.set(path, false);
       return false;
     }
+  }
+
+  /**
+   * Attempt to detect the Portal SDK root and related directories
+   */
+  private detectPortalPaths(config: GodotServerConfig | undefined = this.initialConfig): void {
+    const candidateRoots: string[] = [];
+    const addCandidate = (candidate?: string | null) => {
+      if (candidate) {
+        const normalized = normalize(candidate);
+        if (!candidateRoots.includes(normalized)) {
+          candidateRoots.push(normalized);
+        }
+      }
+    };
+
+    if (!this.portalSdkPath && config?.portalSdkPath) {
+      addCandidate(config.portalSdkPath);
+    } else if (this.portalSdkPath) {
+      addCandidate(this.portalSdkPath);
+    }
+
+    if (process.env.PORTAL_SDK_PATH) {
+      addCandidate(process.env.PORTAL_SDK_PATH);
+    }
+
+    if (!this.portalProjectPath && config?.portalProjectPath) {
+      this.portalProjectPath = normalize(config.portalProjectPath);
+    }
+    if (!this.portalProjectPath && process.env.PORTAL_PROJECT_PATH) {
+      this.portalProjectPath = normalize(process.env.PORTAL_PROJECT_PATH);
+    }
+    if (!this.fbExportDataPath && config?.fbExportDataPath) {
+      this.fbExportDataPath = normalize(config.fbExportDataPath);
+    }
+    if (!this.fbExportDataPath && process.env.PORTAL_FB_EXPORT_PATH) {
+      this.fbExportDataPath = normalize(process.env.PORTAL_FB_EXPORT_PATH);
+    }
+
+    const searchDirs = [process.cwd(), __dirname, dirname(__dirname)];
+    for (const dir of searchDirs) {
+      const resolved = this.resolvePortalSdkRootFrom(dir);
+      if (resolved) {
+        addCandidate(resolved);
+      }
+    }
+
+    for (const candidate of candidateRoots) {
+      if (this.isValidPortalSdkRoot(candidate)) {
+        if (!this.portalSdkPath || this.portalSdkPath !== candidate) {
+          this.logDebug(`Detected Portal SDK path: ${candidate}`);
+        }
+        this.portalSdkPath = candidate;
+        break;
+      }
+    }
+
+    if (this.portalSdkPath) {
+      const projectCandidate = normalize(join(this.portalSdkPath, 'GodotProject'));
+      if (!this.portalProjectPath && existsSync(join(projectCandidate, 'project.godot'))) {
+        this.portalProjectPath = projectCandidate;
+        this.logDebug(`Detected Portal project path: ${this.portalProjectPath}`);
+      }
+
+      const fbCandidate = normalize(join(this.portalSdkPath, 'SDK', 'deps', 'FbExportData'));
+      if (!this.fbExportDataPath && existsSync(fbCandidate)) {
+        this.fbExportDataPath = fbCandidate;
+        this.logDebug(`Detected Portal FbExportData path: ${this.fbExportDataPath}`);
+      }
+    }
+
+    if (this.portalProjectPath) {
+      this.portalProjectPath = normalize(this.portalProjectPath);
+    }
+    if (this.fbExportDataPath) {
+      this.fbExportDataPath = normalize(this.fbExportDataPath);
+    }
+  }
+
+  /**
+   * Resolve a Portal SDK root directory by searching upwards from a starting point
+   */
+  private resolvePortalSdkRootFrom(startDir: string): string | null {
+    if (!startDir) {
+      return null;
+    }
+
+    let current = normalize(startDir);
+    const visited = new Set<string>();
+
+    while (!visited.has(current)) {
+      if (this.isValidPortalSdkRoot(current)) {
+        return current;
+      }
+
+      const candidate = join(current, 'PortalSDK');
+      if (this.isValidPortalSdkRoot(candidate)) {
+        return candidate;
+      }
+
+      visited.add(current);
+      const parent = dirname(current);
+      if (parent === current) {
+        break;
+      }
+      current = parent;
+    }
+
+    return null;
+  }
+
+  /**
+   * Determine if a path looks like a Portal SDK root
+   */
+  private isValidPortalSdkRoot(pathToCheck: string): boolean {
+    if (!pathToCheck) {
+      return false;
+    }
+
+    const sdkDir = join(pathToCheck, 'SDK');
+    const projectDir = join(pathToCheck, 'GodotProject');
+    const fbExportDir = join(pathToCheck, 'SDK', 'deps', 'FbExportData');
+
+    return (
+      existsSync(sdkDir) &&
+      existsSync(projectDir) &&
+      existsSync(join(projectDir, 'project.godot')) &&
+      existsSync(fbExportDir)
+    );
+  }
+
+  /**
+   * Resolve the project path, defaulting to the detected Portal project when available
+   */
+  private resolveProjectPath(providedPath?: string): string | null {
+    if (providedPath) {
+      return normalize(providedPath);
+    }
+
+    this.detectPortalPaths();
+
+    if (this.portalProjectPath) {
+      return this.portalProjectPath;
+    }
+
+    return null;
+  }
+
+  /**
+   * Load JSON from disk with logging on parse failures
+   */
+  private readJsonFile(filePath: string): any | null {
+    try {
+      if (!existsSync(filePath)) {
+        return null;
+      }
+      const content = readFileSync(filePath, 'utf-8');
+      return JSON.parse(content);
+    } catch (error) {
+      this.logDebug(`Failed to read JSON file ${filePath}: ${error}`);
+      return null;
+    }
+  }
+
+  /**
+   * Find Portal script directories for a specific level
+   */
+  private findPortalScriptDirectories(levelName: string): string[] {
+    if (!this.portalProjectPath) {
+      return [];
+    }
+
+    const scriptsDir = join(this.portalProjectPath, 'scripts');
+    if (!existsSync(scriptsDir)) {
+      return [];
+    }
+
+    const result: string[] = [];
+
+    try {
+      const theaters = readdirSync(scriptsDir, { withFileTypes: true });
+      for (const theater of theaters) {
+        if (!theater.isDirectory()) {
+          continue;
+        }
+        const levelDir = join(scriptsDir, theater.name, levelName);
+        if (existsSync(levelDir)) {
+          result.push(normalize(levelDir));
+        }
+      }
+    } catch (error) {
+      this.logDebug(`Failed to scan Portal script directories: ${error}`);
+    }
+
+    return result;
+  }
+
+  /**
+   * Get a helper script path from the Portal gdconverter utilities
+   */
+  private getGdConverterScriptPath(scriptName: string): string | null {
+    this.detectPortalPaths();
+
+    if (!this.portalSdkPath) {
+      return null;
+    }
+
+    const scriptPath = join(
+      this.portalSdkPath,
+      'SDK',
+      'deps',
+      'gdconverter',
+      'src',
+      'gdconverter',
+      scriptName
+    );
+
+    if (existsSync(scriptPath)) {
+      return normalize(scriptPath);
+    }
+
+    return null;
+  }
+
+  /**
+   * Ensure a Python interpreter is available for Portal SDK scripts
+   */
+  private async ensurePythonCommand(): Promise<string> {
+    if (this.pythonCommand && (await this.validatePythonCommand(this.pythonCommand))) {
+      return this.pythonCommand;
+    }
+
+    const tested = new Set<string>();
+    const candidates: Array<string | undefined> = [];
+
+    if (this.initialConfig?.pythonPath) {
+      candidates.push(this.initialConfig.pythonPath);
+    }
+    if (process.env.PYTHON_PATH) {
+      candidates.push(process.env.PYTHON_PATH);
+    }
+    candidates.push('python3', 'python');
+
+    for (const candidate of candidates) {
+      if (!candidate) {
+        continue;
+      }
+      if (tested.has(candidate)) {
+        continue;
+      }
+      tested.add(candidate);
+      if (await this.validatePythonCommand(candidate)) {
+        this.pythonCommand = candidate;
+        this.logDebug(`Using Python command: ${candidate}`);
+        return candidate;
+      }
+    }
+
+    throw new Error(
+      'Unable to locate a Python interpreter. Set PYTHON_PATH or pythonPath in the server configuration.'
+    );
+  }
+
+  /**
+   * Validate a python command by checking it can report its version
+   */
+  private async validatePythonCommand(command: string): Promise<boolean> {
+    try {
+      await execFileAsync(command, ['--version']);
+      return true;
+    } catch (error) {
+      this.logDebug(`Python validation failed for ${command}: ${error}`);
+      return false;
+    }
+  }
+
+  /**
+   * Execute a Python script and return stdout/stderr information
+   */
+  private async runPythonScript(
+    scriptPath: string,
+    args: string[],
+    options?: { cwd?: string }
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const pythonCommand = await this.ensurePythonCommand();
+
+    return await new Promise((resolve, reject) => {
+      const child = spawn(pythonCommand, [scriptPath, ...args], {
+        cwd: options?.cwd,
+        stdio: 'pipe',
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout.on('data', (data: Buffer) => {
+        stdout += data.toString();
+      });
+
+      child.stderr.on('data', (data: Buffer) => {
+        stderr += data.toString();
+      });
+
+      child.on('error', (error: Error) => {
+        reject(error);
+      });
+
+      child.on('close', (code: number | null) => {
+        resolve({
+          stdout,
+          stderr,
+          exitCode: code ?? 0,
+        });
+      });
+    });
   }
 
   /**
@@ -668,34 +1044,34 @@ class GodotServer {
       tools: [
         {
           name: 'launch_editor',
-          description: 'Launch Godot editor for a specific project',
+          description: 'Launch Godot editor for a specific project (defaults to the detected Portal project)',
           inputSchema: {
             type: 'object',
             properties: {
               projectPath: {
                 type: 'string',
-                description: 'Path to the Godot project directory',
+                description: 'Path to the Godot project directory (defaults to Battlefield Portal project when available)',
               },
             },
-            required: ['projectPath'],
+            required: [],
           },
         },
         {
           name: 'run_project',
-          description: 'Run the Godot project and capture output',
+          description: 'Run the Godot project and capture output (defaults to the detected Portal project)',
           inputSchema: {
             type: 'object',
             properties: {
               projectPath: {
                 type: 'string',
-                description: 'Path to the Godot project directory',
+                description: 'Path to the Godot project directory (defaults to Battlefield Portal project when available)',
               },
               scene: {
                 type: 'string',
                 description: 'Optional: Specific scene to run',
               },
             },
-            required: ['projectPath'],
+            required: [],
           },
         },
         {
@@ -751,10 +1127,10 @@ class GodotServer {
             properties: {
               projectPath: {
                 type: 'string',
-                description: 'Path to the Godot project directory',
+                description: 'Path to the Godot project directory (defaults to Battlefield Portal project when available)',
               },
             },
-            required: ['projectPath'],
+            required: [],
           },
         },
         {
@@ -765,7 +1141,7 @@ class GodotServer {
             properties: {
               projectPath: {
                 type: 'string',
-                description: 'Path to the Godot project directory',
+                description: 'Path to the Godot project directory (defaults to Battlefield Portal project when available)',
               },
               scenePath: {
                 type: 'string',
@@ -777,7 +1153,7 @@ class GodotServer {
                 default: 'Node2D',
               },
             },
-            required: ['projectPath', 'scenePath'],
+            required: ['scenePath'],
           },
         },
         {
@@ -788,7 +1164,7 @@ class GodotServer {
             properties: {
               projectPath: {
                 type: 'string',
-                description: 'Path to the Godot project directory',
+                description: 'Path to the Godot project directory (defaults to Battlefield Portal project when available)',
               },
               scenePath: {
                 type: 'string',
@@ -812,7 +1188,7 @@ class GodotServer {
                 description: 'Optional properties to set on the node',
               },
             },
-            required: ['projectPath', 'scenePath', 'nodeType', 'nodeName'],
+            required: ['scenePath', 'nodeType', 'nodeName'],
           },
         },
         {
@@ -823,7 +1199,7 @@ class GodotServer {
             properties: {
               projectPath: {
                 type: 'string',
-                description: 'Path to the Godot project directory',
+                description: 'Path to the Godot project directory (defaults to Battlefield Portal project when available)',
               },
               scenePath: {
                 type: 'string',
@@ -838,7 +1214,7 @@ class GodotServer {
                 description: 'Path to the texture file (relative to project)',
               },
             },
-            required: ['projectPath', 'scenePath', 'nodePath', 'texturePath'],
+            required: ['scenePath', 'nodePath', 'texturePath'],
           },
         },
         {
@@ -849,7 +1225,7 @@ class GodotServer {
             properties: {
               projectPath: {
                 type: 'string',
-                description: 'Path to the Godot project directory',
+                description: 'Path to the Godot project directory (defaults to Battlefield Portal project when available)',
               },
               scenePath: {
                 type: 'string',
@@ -867,7 +1243,7 @@ class GodotServer {
                 description: 'Optional: Names of specific mesh items to include (defaults to all)',
               },
             },
-            required: ['projectPath', 'scenePath', 'outputPath'],
+            required: ['scenePath', 'outputPath'],
           },
         },
         {
@@ -878,7 +1254,7 @@ class GodotServer {
             properties: {
               projectPath: {
                 type: 'string',
-                description: 'Path to the Godot project directory',
+                description: 'Path to the Godot project directory (defaults to Battlefield Portal project when available)',
               },
               scenePath: {
                 type: 'string',
@@ -889,7 +1265,7 @@ class GodotServer {
                 description: 'Optional: New path to save the scene to (for creating variants)',
               },
             },
-            required: ['projectPath', 'scenePath'],
+            required: ['scenePath'],
           },
         },
         {
@@ -900,14 +1276,14 @@ class GodotServer {
             properties: {
               projectPath: {
                 type: 'string',
-                description: 'Path to the Godot project directory',
+                description: 'Path to the Godot project directory (defaults to Battlefield Portal project when available)',
               },
               filePath: {
                 type: 'string',
                 description: 'Path to the file (relative to project) for which to get the UID',
               },
             },
-            required: ['projectPath', 'filePath'],
+            required: ['filePath'],
           },
         },
         {
@@ -918,10 +1294,86 @@ class GodotServer {
             properties: {
               projectPath: {
                 type: 'string',
-                description: 'Path to the Godot project directory',
+                description: 'Path to the Godot project directory (defaults to Battlefield Portal project when available)',
               },
             },
-            required: ['projectPath'],
+            required: [],
+          },
+        },
+        {
+          name: 'get_portal_sdk_info',
+          description: 'Inspect detected Battlefield Portal SDK paths and configuration',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+            required: [],
+          },
+        },
+        {
+          name: 'list_portal_levels',
+          description: 'List available Battlefield Portal levels and related resources',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              fbExportDataPath: {
+                type: 'string',
+                description: 'Optional: Override path to the FbExportData directory',
+              },
+              projectPath: {
+                type: 'string',
+                description: 'Optional: Override path to the Battlefield Portal Godot project',
+              },
+            },
+            required: [],
+          },
+        },
+        {
+          name: 'export_portal_level',
+          description: 'Export a Battlefield Portal level to spatial JSON using the gdconverter tooling',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              scenePath: {
+                type: 'string',
+                description: 'Path to the scene (.tscn) file to export (relative to the project by default)',
+              },
+              outputDir: {
+                type: 'string',
+                description: 'Optional: Directory where the exported .spatial.json will be written (defaults to a portal_exports folder inside the project)',
+              },
+              projectPath: {
+                type: 'string',
+                description: 'Optional: Override path to the Battlefield Portal Godot project',
+              },
+              fbExportDataPath: {
+                type: 'string',
+                description: 'Optional: Override path to the FbExportData directory',
+              },
+            },
+            required: ['scenePath'],
+          },
+        },
+        {
+          name: 'create_portal_project',
+          description: 'Regenerate the Battlefield Portal Godot project from FbExportData assets',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              fbExportDataPath: {
+                type: 'string',
+                description: 'Optional: Override path to the FbExportData directory',
+              },
+              outputDir: {
+                type: 'string',
+                description: 'Optional: Destination directory for the generated project (defaults to the detected Portal project path)',
+              },
+              overwriteLevels: {
+                type: 'boolean',
+                description: 'Whether to overwrite existing level scenes when regenerating',
+                default: false,
+              },
+            },
+            required: [],
           },
         },
       ],
@@ -959,6 +1411,14 @@ class GodotServer {
           return await this.handleGetUid(request.params.arguments);
         case 'update_project_uids':
           return await this.handleUpdateProjectUids(request.params.arguments);
+        case 'get_portal_sdk_info':
+          return await this.handleGetPortalSdkInfo();
+        case 'list_portal_levels':
+          return await this.handleListPortalLevels(request.params.arguments);
+        case 'export_portal_level':
+          return await this.handleExportPortalLevel(request.params.arguments);
+        case 'create_portal_project':
+          return await this.handleCreatePortalProject(request.params.arguments);
         default:
           throw new McpError(
             ErrorCode.MethodNotFound,
@@ -975,18 +1435,22 @@ class GodotServer {
   private async handleLaunchEditor(args: any) {
     // Normalize parameters to camelCase
     args = this.normalizeParameters(args);
-    
-    if (!args.projectPath) {
-      return this.createErrorResponse(
-        'Project path is required',
-        ['Provide a valid path to a Godot project directory']
-      );
-    }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (args.projectPath && !this.validatePath(args.projectPath)) {
       return this.createErrorResponse(
         'Invalid project path',
         ['Provide a valid path without ".." or other potentially unsafe characters']
+      );
+    }
+
+    const projectPath = this.resolveProjectPath(args.projectPath);
+    if (!projectPath) {
+      return this.createErrorResponse(
+        'Project path is required',
+        [
+          'Provide a valid path to a Godot project directory',
+          'Ensure the Battlefield Portal SDK is installed and detectable',
+        ]
       );
     }
 
@@ -1006,10 +1470,10 @@ class GodotServer {
       }
 
       // Check if the project directory exists and contains a project.godot file
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
         return this.createErrorResponse(
-          `Not a valid Godot project: ${args.projectPath}`,
+          `Not a valid Godot project: ${projectPath}`,
           [
             'Ensure the path points to a directory containing a project.godot file',
             'Use list_projects to find valid Godot projects',
@@ -1017,8 +1481,8 @@ class GodotServer {
         );
       }
 
-      this.logDebug(`Launching Godot editor for project: ${args.projectPath}`);
-      const process = spawn(this.godotPath, ['-e', '--path', args.projectPath], {
+      this.logDebug(`Launching Godot editor for project: ${projectPath}`);
+      const process = spawn(this.godotPath, ['-e', '--path', projectPath], {
         stdio: 'pipe',
       });
 
@@ -1030,7 +1494,7 @@ class GodotServer {
         content: [
           {
             type: 'text',
-            text: `Godot editor launched successfully for project at ${args.projectPath}.`,
+            text: `Godot editor launched successfully for project at ${projectPath}.`,
           },
         ],
       };
@@ -1054,27 +1518,31 @@ class GodotServer {
   private async handleRunProject(args: any) {
     // Normalize parameters to camelCase
     args = this.normalizeParameters(args);
-    
-    if (!args.projectPath) {
-      return this.createErrorResponse(
-        'Project path is required',
-        ['Provide a valid path to a Godot project directory']
-      );
-    }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (args.projectPath && !this.validatePath(args.projectPath)) {
       return this.createErrorResponse(
         'Invalid project path',
         ['Provide a valid path without ".." or other potentially unsafe characters']
       );
     }
 
+    const projectPath = this.resolveProjectPath(args.projectPath);
+    if (!projectPath) {
+      return this.createErrorResponse(
+        'Project path is required',
+        [
+          'Provide a valid path to a Godot project directory',
+          'Ensure the Battlefield Portal SDK is installed and detectable',
+        ]
+      );
+    }
+
     try {
       // Check if the project directory exists and contains a project.godot file
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
         return this.createErrorResponse(
-          `Not a valid Godot project: ${args.projectPath}`,
+          `Not a valid Godot project: ${projectPath}`,
           [
             'Ensure the path points to a directory containing a project.godot file',
             'Use list_projects to find valid Godot projects',
@@ -1088,13 +1556,13 @@ class GodotServer {
         this.activeProcess.process.kill();
       }
 
-      const cmdArgs = ['-d', '--path', args.projectPath];
+      const cmdArgs = ['-d', '--path', projectPath];
       if (args.scene && this.validatePath(args.scene)) {
         this.logDebug(`Adding scene parameter: ${args.scene}`);
         cmdArgs.push(args.scene);
       }
 
-      this.logDebug(`Running Godot project: ${args.projectPath}`);
+      this.logDebug(`Running Godot project: ${projectPath}`);
       const process = spawn(this.godotPath!, cmdArgs, { stdio: 'pipe' });
       const output: string[] = [];
       const errors: string[] = [];
@@ -1135,7 +1603,7 @@ class GodotServer {
         content: [
           {
             type: 'text',
-            text: `Godot project started in debug mode. Use get_debug_output to see output.`,
+            text: `Godot project started in debug mode from ${projectPath}. Use get_debug_output to see output.`,
           },
         ],
       };
@@ -1382,21 +1850,25 @@ class GodotServer {
   private async handleGetProjectInfo(args: any) {
     // Normalize parameters to camelCase
     args = this.normalizeParameters(args);
-    
-    if (!args.projectPath) {
-      return this.createErrorResponse(
-        'Project path is required',
-        ['Provide a valid path to a Godot project directory']
-      );
-    }
-  
-    if (!this.validatePath(args.projectPath)) {
+
+    if (args.projectPath && !this.validatePath(args.projectPath)) {
       return this.createErrorResponse(
         'Invalid project path',
         ['Provide a valid path without ".." or other potentially unsafe characters']
       );
     }
-  
+
+    const projectPath = this.resolveProjectPath(args.projectPath);
+    if (!projectPath) {
+      return this.createErrorResponse(
+        'Project path is required',
+        [
+          'Provide a valid path to a Godot project directory',
+          'Ensure the Battlefield Portal SDK is installed and detectable',
+        ]
+      );
+    }
+
     try {
       // Ensure godotPath is set
       if (!this.godotPath) {
@@ -1411,33 +1883,32 @@ class GodotServer {
           );
         }
       }
-  
+
       // Check if the project directory exists and contains a project.godot file
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
         return this.createErrorResponse(
-          `Not a valid Godot project: ${args.projectPath}`,
+          `Not a valid Godot project: ${projectPath}`,
           [
             'Ensure the path points to a directory containing a project.godot file',
             'Use list_projects to find valid Godot projects',
           ]
         );
       }
-  
-      this.logDebug(`Getting project info for: ${args.projectPath}`);
-  
+
+      this.logDebug(`Getting project info for: ${projectPath}`);
+
       // Get Godot version
       const execOptions = { timeout: 10000 }; // 10 second timeout
       const { stdout } = await execAsync(`"${this.godotPath}" --version`, execOptions);
-  
+
       // Get project structure using the recursive method
-      const projectStructure = await this.getProjectStructureAsync(args.projectPath);
-  
+      const projectStructure = await this.getProjectStructureAsync(projectPath);
+
       // Extract project name from project.godot file
-      let projectName = basename(args.projectPath);
+      let projectName = basename(projectPath);
       try {
-        const fs = require('fs');
-        const projectFileContent = fs.readFileSync(projectFile, 'utf8');
+        const projectFileContent = readFileSync(projectFile, 'utf8');
         const configNameMatch = projectFileContent.match(/config\/name="([^"]+)"/);
         if (configNameMatch && configNameMatch[1]) {
           projectName = configNameMatch[1];
@@ -1455,7 +1926,7 @@ class GodotServer {
             text: JSON.stringify(
               {
                 name: projectName,
-                path: args.projectPath,
+                path: projectPath,
                 godotVersion: stdout.trim(),
                 structure: projectStructure,
               },
@@ -1484,26 +1955,37 @@ class GodotServer {
     // Normalize parameters to camelCase
     args = this.normalizeParameters(args);
     
-    if (!args.projectPath || !args.scenePath) {
+    if (!args.scenePath) {
       return this.createErrorResponse(
-        'Project path and scene path are required',
-        ['Provide valid paths for both the project and the scene']
+        'Scene path is required',
+        ['Provide a valid scene path relative to the project']
       );
     }
 
-    if (!this.validatePath(args.projectPath) || !this.validatePath(args.scenePath)) {
+    if ((args.projectPath && !this.validatePath(args.projectPath)) || !this.validatePath(args.scenePath)) {
       return this.createErrorResponse(
         'Invalid path',
         ['Provide valid paths without ".." or other potentially unsafe characters']
       );
     }
 
+    const projectPath = this.resolveProjectPath(args.projectPath);
+    if (!projectPath) {
+      return this.createErrorResponse(
+        'Project path is required',
+        [
+          'Provide a valid path to a Godot project directory',
+          'Ensure the Battlefield Portal SDK is installed and detectable',
+        ]
+      );
+    }
+
     try {
       // Check if the project directory exists and contains a project.godot file
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
         return this.createErrorResponse(
-          `Not a valid Godot project: ${args.projectPath}`,
+          `Not a valid Godot project: ${projectPath}`,
           [
             'Ensure the path points to a directory containing a project.godot file',
             'Use list_projects to find valid Godot projects',
@@ -1518,7 +2000,7 @@ class GodotServer {
       };
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('create_scene', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('create_scene', params, projectPath);
 
       if (stderr && stderr.includes('Failed to')) {
         return this.createErrorResponse(
@@ -1558,26 +2040,37 @@ class GodotServer {
     // Normalize parameters to camelCase
     args = this.normalizeParameters(args);
     
-    if (!args.projectPath || !args.scenePath || !args.nodeType || !args.nodeName) {
+    if (!args.scenePath || !args.nodeType || !args.nodeName) {
       return this.createErrorResponse(
         'Missing required parameters',
-        ['Provide projectPath, scenePath, nodeType, and nodeName']
+        ['Provide scenePath, nodeType, and nodeName']
       );
     }
 
-    if (!this.validatePath(args.projectPath) || !this.validatePath(args.scenePath)) {
+    if ((args.projectPath && !this.validatePath(args.projectPath)) || !this.validatePath(args.scenePath)) {
       return this.createErrorResponse(
         'Invalid path',
         ['Provide valid paths without ".." or other potentially unsafe characters']
       );
     }
 
+    const projectPath = this.resolveProjectPath(args.projectPath);
+    if (!projectPath) {
+      return this.createErrorResponse(
+        'Project path is required',
+        [
+          'Provide a valid path to a Godot project directory',
+          'Ensure the Battlefield Portal SDK is installed and detectable',
+        ]
+      );
+    }
+
     try {
       // Check if the project directory exists and contains a project.godot file
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
         return this.createErrorResponse(
-          `Not a valid Godot project: ${args.projectPath}`,
+          `Not a valid Godot project: ${projectPath}`,
           [
             'Ensure the path points to a directory containing a project.godot file',
             'Use list_projects to find valid Godot projects',
@@ -1586,7 +2079,7 @@ class GodotServer {
       }
 
       // Check if the scene file exists
-      const scenePath = join(args.projectPath, args.scenePath);
+      const scenePath = join(projectPath, args.scenePath);
       if (!existsSync(scenePath)) {
         return this.createErrorResponse(
           `Scene file does not exist: ${args.scenePath}`,
@@ -1614,7 +2107,7 @@ class GodotServer {
       }
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('add_node', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('add_node', params, projectPath);
 
       if (stderr && stderr.includes('Failed to')) {
         return this.createErrorResponse(
@@ -1654,15 +2147,15 @@ class GodotServer {
     // Normalize parameters to camelCase
     args = this.normalizeParameters(args);
     
-    if (!args.projectPath || !args.scenePath || !args.nodePath || !args.texturePath) {
+    if (!args.scenePath || !args.nodePath || !args.texturePath) {
       return this.createErrorResponse(
         'Missing required parameters',
-        ['Provide projectPath, scenePath, nodePath, and texturePath']
+        ['Provide scenePath, nodePath, and texturePath']
       );
     }
 
     if (
-      !this.validatePath(args.projectPath) ||
+      (args.projectPath && !this.validatePath(args.projectPath)) ||
       !this.validatePath(args.scenePath) ||
       !this.validatePath(args.nodePath) ||
       !this.validatePath(args.texturePath)
@@ -1673,12 +2166,23 @@ class GodotServer {
       );
     }
 
+    const projectPath = this.resolveProjectPath(args.projectPath);
+    if (!projectPath) {
+      return this.createErrorResponse(
+        'Project path is required',
+        [
+          'Provide a valid path to a Godot project directory',
+          'Ensure the Battlefield Portal SDK is installed and detectable',
+        ]
+      );
+    }
+
     try {
       // Check if the project directory exists and contains a project.godot file
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
         return this.createErrorResponse(
-          `Not a valid Godot project: ${args.projectPath}`,
+          `Not a valid Godot project: ${projectPath}`,
           [
             'Ensure the path points to a directory containing a project.godot file',
             'Use list_projects to find valid Godot projects',
@@ -1687,7 +2191,7 @@ class GodotServer {
       }
 
       // Check if the scene file exists
-      const scenePath = join(args.projectPath, args.scenePath);
+      const scenePath = join(projectPath, args.scenePath);
       if (!existsSync(scenePath)) {
         return this.createErrorResponse(
           `Scene file does not exist: ${args.scenePath}`,
@@ -1699,7 +2203,7 @@ class GodotServer {
       }
 
       // Check if the texture file exists
-      const texturePath = join(args.projectPath, args.texturePath);
+      const texturePath = join(projectPath, args.texturePath);
       if (!existsSync(texturePath)) {
         return this.createErrorResponse(
           `Texture file does not exist: ${args.texturePath}`,
@@ -1718,7 +2222,7 @@ class GodotServer {
       };
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('load_sprite', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('load_sprite', params, projectPath);
 
       if (stderr && stderr.includes('Failed to')) {
         return this.createErrorResponse(
@@ -1758,15 +2262,15 @@ class GodotServer {
     // Normalize parameters to camelCase
     args = this.normalizeParameters(args);
     
-    if (!args.projectPath || !args.scenePath || !args.outputPath) {
+    if (!args.scenePath || !args.outputPath) {
       return this.createErrorResponse(
         'Missing required parameters',
-        ['Provide projectPath, scenePath, and outputPath']
+        ['Provide scenePath and outputPath']
       );
     }
 
     if (
-      !this.validatePath(args.projectPath) ||
+      (args.projectPath && !this.validatePath(args.projectPath)) ||
       !this.validatePath(args.scenePath) ||
       !this.validatePath(args.outputPath)
     ) {
@@ -1776,12 +2280,23 @@ class GodotServer {
       );
     }
 
+    const projectPath = this.resolveProjectPath(args.projectPath);
+    if (!projectPath) {
+      return this.createErrorResponse(
+        'Project path is required',
+        [
+          'Provide a valid path to a Godot project directory',
+          'Ensure the Battlefield Portal SDK is installed and detectable',
+        ]
+      );
+    }
+
     try {
       // Check if the project directory exists and contains a project.godot file
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
         return this.createErrorResponse(
-          `Not a valid Godot project: ${args.projectPath}`,
+          `Not a valid Godot project: ${projectPath}`,
           [
             'Ensure the path points to a directory containing a project.godot file',
             'Use list_projects to find valid Godot projects',
@@ -1790,7 +2305,7 @@ class GodotServer {
       }
 
       // Check if the scene file exists
-      const scenePath = join(args.projectPath, args.scenePath);
+      const scenePath = join(projectPath, args.scenePath);
       if (!existsSync(scenePath)) {
         return this.createErrorResponse(
           `Scene file does not exist: ${args.scenePath}`,
@@ -1813,7 +2328,7 @@ class GodotServer {
       }
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('export_mesh_library', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('export_mesh_library', params, projectPath);
 
       if (stderr && stderr.includes('Failed to')) {
         return this.createErrorResponse(
@@ -1853,14 +2368,14 @@ class GodotServer {
     // Normalize parameters to camelCase
     args = this.normalizeParameters(args);
     
-    if (!args.projectPath || !args.scenePath) {
+    if (!args.scenePath) {
       return this.createErrorResponse(
         'Missing required parameters',
-        ['Provide projectPath and scenePath']
+        ['Provide scenePath']
       );
     }
 
-    if (!this.validatePath(args.projectPath) || !this.validatePath(args.scenePath)) {
+    if ((args.projectPath && !this.validatePath(args.projectPath)) || !this.validatePath(args.scenePath)) {
       return this.createErrorResponse(
         'Invalid path',
         ['Provide valid paths without ".." or other potentially unsafe characters']
@@ -1875,12 +2390,23 @@ class GodotServer {
       );
     }
 
+    const projectPath = this.resolveProjectPath(args.projectPath);
+    if (!projectPath) {
+      return this.createErrorResponse(
+        'Project path is required',
+        [
+          'Provide a valid path to a Godot project directory',
+          'Ensure the Battlefield Portal SDK is installed and detectable',
+        ]
+      );
+    }
+
     try {
       // Check if the project directory exists and contains a project.godot file
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
         return this.createErrorResponse(
-          `Not a valid Godot project: ${args.projectPath}`,
+          `Not a valid Godot project: ${projectPath}`,
           [
             'Ensure the path points to a directory containing a project.godot file',
             'Use list_projects to find valid Godot projects',
@@ -1889,7 +2415,7 @@ class GodotServer {
       }
 
       // Check if the scene file exists
-      const scenePath = join(args.projectPath, args.scenePath);
+      const scenePath = join(projectPath, args.scenePath);
       if (!existsSync(scenePath)) {
         return this.createErrorResponse(
           `Scene file does not exist: ${args.scenePath}`,
@@ -1911,7 +2437,7 @@ class GodotServer {
       }
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('save_scene', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('save_scene', params, projectPath);
 
       if (stderr && stderr.includes('Failed to')) {
         return this.createErrorResponse(
@@ -1952,17 +2478,28 @@ class GodotServer {
     // Normalize parameters to camelCase
     args = this.normalizeParameters(args);
     
-    if (!args.projectPath || !args.filePath) {
+    if (!args.filePath) {
       return this.createErrorResponse(
         'Missing required parameters',
-        ['Provide projectPath and filePath']
+        ['Provide filePath']
       );
     }
 
-    if (!this.validatePath(args.projectPath) || !this.validatePath(args.filePath)) {
+    if ((args.projectPath && !this.validatePath(args.projectPath)) || !this.validatePath(args.filePath)) {
       return this.createErrorResponse(
         'Invalid path',
         ['Provide valid paths without ".." or other potentially unsafe characters']
+      );
+    }
+
+    const projectPath = this.resolveProjectPath(args.projectPath);
+    if (!projectPath) {
+      return this.createErrorResponse(
+        'Project path is required',
+        [
+          'Provide a valid path to a Godot project directory',
+          'Ensure the Battlefield Portal SDK is installed and detectable',
+        ]
       );
     }
 
@@ -1982,10 +2519,10 @@ class GodotServer {
       }
 
       // Check if the project directory exists and contains a project.godot file
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
         return this.createErrorResponse(
-          `Not a valid Godot project: ${args.projectPath}`,
+          `Not a valid Godot project: ${projectPath}`,
           [
             'Ensure the path points to a directory containing a project.godot file',
             'Use list_projects to find valid Godot projects',
@@ -1994,7 +2531,7 @@ class GodotServer {
       }
 
       // Check if the file exists
-      const filePath = join(args.projectPath, args.filePath);
+      const filePath = join(projectPath, args.filePath);
       if (!existsSync(filePath)) {
         return this.createErrorResponse(
           `File does not exist: ${args.filePath}`,
@@ -2022,7 +2559,7 @@ class GodotServer {
       };
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('get_uid', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('get_uid', params, projectPath);
 
       if (stderr && stderr.includes('Failed to')) {
         return this.createErrorResponse(
@@ -2060,18 +2597,22 @@ class GodotServer {
   private async handleUpdateProjectUids(args: any) {
     // Normalize parameters to camelCase
     args = this.normalizeParameters(args);
-    
-    if (!args.projectPath) {
-      return this.createErrorResponse(
-        'Project path is required',
-        ['Provide a valid path to a Godot project directory']
-      );
-    }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (args.projectPath && !this.validatePath(args.projectPath)) {
       return this.createErrorResponse(
         'Invalid project path',
         ['Provide a valid path without ".." or other potentially unsafe characters']
+      );
+    }
+
+    const projectPath = this.resolveProjectPath(args.projectPath);
+    if (!projectPath) {
+      return this.createErrorResponse(
+        'Project path is required',
+        [
+          'Provide a valid path to a Godot project directory',
+          'Ensure the Battlefield Portal SDK is installed and detectable',
+        ]
       );
     }
 
@@ -2091,10 +2632,10 @@ class GodotServer {
       }
 
       // Check if the project directory exists and contains a project.godot file
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
         return this.createErrorResponse(
-          `Not a valid Godot project: ${args.projectPath}`,
+          `Not a valid Godot project: ${projectPath}`,
           [
             'Ensure the path points to a directory containing a project.godot file',
             'Use list_projects to find valid Godot projects',
@@ -2118,11 +2659,11 @@ class GodotServer {
 
       // Prepare parameters for the operation (already in camelCase)
       const params = {
-        projectPath: args.projectPath,
+        projectPath,
       };
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('resave_resources', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('resave_resources', params, projectPath);
 
       if (stderr && stderr.includes('Failed to')) {
         return this.createErrorResponse(
@@ -2149,6 +2690,389 @@ class GodotServer {
           'Ensure Godot is installed correctly',
           'Check if the GODOT_PATH environment variable is set correctly',
           'Verify the project path is accessible',
+        ]
+      );
+    }
+  }
+
+  /**
+   * Provide details about detected Battlefield Portal SDK paths
+   */
+  private async handleGetPortalSdkInfo() {
+    this.detectPortalPaths();
+
+    const info = {
+      portalSdkPath: this.portalSdkPath,
+      portalSdkPathExists: this.portalSdkPath ? existsSync(this.portalSdkPath) : false,
+      portalProjectPath: this.portalProjectPath,
+      portalProjectPathExists: this.portalProjectPath
+        ? existsSync(join(this.portalProjectPath, 'project.godot'))
+        : false,
+      fbExportDataPath: this.fbExportDataPath,
+      fbExportDataPathExists: this.fbExportDataPath ? existsSync(this.fbExportDataPath) : false,
+      pythonCommand: this.pythonCommand,
+    };
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(info, null, 2),
+        },
+      ],
+    };
+  }
+
+  /**
+   * List available Battlefield Portal levels and metadata
+   */
+  private async handleListPortalLevels(args: any) {
+    args = this.normalizeParameters(args);
+
+    this.detectPortalPaths();
+
+    let fbExportDataPath: string | null = null;
+    if (typeof args.fbExportDataPath === 'string' && args.fbExportDataPath.trim()) {
+      fbExportDataPath = normalize(args.fbExportDataPath);
+    } else if (this.fbExportDataPath) {
+      fbExportDataPath = this.fbExportDataPath;
+    }
+
+    if (!fbExportDataPath || !existsSync(fbExportDataPath)) {
+      return this.createErrorResponse(
+        'FbExportData path not found',
+        [
+          'Install or extract the Battlefield Portal SDK assets',
+          'Provide fbExportDataPath pointing to SDK/deps/FbExportData',
+        ]
+      );
+    }
+
+    const levelsDir = join(fbExportDataPath, 'levels');
+    if (!existsSync(levelsDir)) {
+      return this.createErrorResponse(
+        'Levels directory missing inside FbExportData',
+        ['Verify the Battlefield Portal SDK installation is complete']
+      );
+    }
+
+    let projectPath: string | null = null;
+    if (typeof args.projectPath === 'string' && args.projectPath.trim()) {
+      if (!this.validatePath(args.projectPath)) {
+        return this.createErrorResponse(
+          'Invalid project path',
+          ['Provide a valid path without ".." or other potentially unsafe characters']
+        );
+      }
+      projectPath = normalize(args.projectPath);
+    } else if (this.portalProjectPath) {
+      projectPath = this.portalProjectPath;
+    }
+
+    if (projectPath && !existsSync(projectPath)) {
+      projectPath = null;
+    }
+
+    const levelInfo = this.readJsonFile(join(fbExportDataPath, 'level_info.json')) ?? {};
+    const levels: Array<Record<string, any>> = [];
+
+    try {
+      const entries = readdirSync(levelsDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith('.spatial.json')) {
+          continue;
+        }
+
+        const baseName = entry.name.replace('.spatial.json', '');
+        const level: Record<string, any> = {
+          name: baseName,
+          spatialPath: normalize(join(levelsDir, entry.name)),
+        };
+
+        if (levelInfo && levelInfo[baseName]) {
+          level.info = levelInfo[baseName];
+        }
+
+        if (projectPath) {
+          const staticDir = join(projectPath, 'static');
+          const assetsPath = join(staticDir, `${baseName}_Assets.tscn`);
+          const terrainPath = join(staticDir, `${baseName}_Terrain.tscn`);
+
+          if (existsSync(assetsPath)) {
+            level.assetsScene = normalize(assetsPath);
+          }
+          if (existsSync(terrainPath)) {
+            level.terrainScene = normalize(terrainPath);
+          }
+
+          const scriptDirs = this.findPortalScriptDirectories(baseName);
+          if (scriptDirs.length > 0) {
+            level.scriptDirectories = scriptDirs;
+          }
+        }
+
+        levels.push(level);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return this.createErrorResponse(
+        `Failed to enumerate Portal levels: ${message}`,
+        ['Verify the FbExportData directory is accessible']
+      );
+    }
+
+    levels.sort((a, b) => a.name.localeCompare(b.name));
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              fbExportDataPath,
+              projectPath,
+              count: levels.length,
+              levels,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+
+  /**
+   * Export a Portal level to spatial JSON via the gdconverter tooling
+   */
+  private async handleExportPortalLevel(args: any) {
+    args = this.normalizeParameters(args);
+
+    if (!args.scenePath) {
+      return this.createErrorResponse(
+        'Scene path is required',
+        ['Provide the path to the scene (.tscn) file to export']
+      );
+    }
+
+    if (!this.validatePath(args.scenePath)) {
+      return this.createErrorResponse(
+        'Invalid scene path',
+        ['Provide a scene path without ".." or other potentially unsafe characters']
+      );
+    }
+
+    if (args.outputDir && !this.validatePath(args.outputDir)) {
+      return this.createErrorResponse(
+        'Invalid output directory',
+        ['Provide an output directory without ".." or other potentially unsafe characters']
+      );
+    }
+
+    const projectPath = this.resolveProjectPath(args.projectPath);
+    if (!projectPath) {
+      return this.createErrorResponse(
+        'Project path is required',
+        [
+          'Provide a valid path to the Battlefield Portal Godot project',
+          'Ensure the Portal SDK has been detected correctly',
+        ]
+      );
+    }
+
+    const fbExportDataPath =
+      typeof args.fbExportDataPath === 'string' && args.fbExportDataPath.trim()
+        ? normalize(args.fbExportDataPath)
+        : this.fbExportDataPath;
+
+    if (!fbExportDataPath || !existsSync(fbExportDataPath)) {
+      return this.createErrorResponse(
+        'FbExportData path not found',
+        [
+          'Install or extract the Battlefield Portal SDK assets',
+          'Provide fbExportDataPath pointing to SDK/deps/FbExportData',
+        ]
+      );
+    }
+
+    const converterScript = this.getGdConverterScriptPath('export_tscn.py');
+    if (!converterScript) {
+      return this.createErrorResponse(
+        'Could not locate export_tscn.py in the Battlefield Portal SDK',
+        [
+          'Verify the Portal SDK repository is available',
+          'Set PORTAL_SDK_PATH to the SDK root',
+        ]
+      );
+    }
+
+    const sceneFile = this.toAbsolutePath(projectPath, args.scenePath);
+    if (!existsSync(sceneFile)) {
+      return this.createErrorResponse(
+        `Scene file does not exist: ${sceneFile}`,
+        [
+          'Ensure the scene path is correct relative to the project',
+          'Open the scene in Godot to verify it exists',
+        ]
+      );
+    }
+
+    let outputDir: string;
+    if (typeof args.outputDir === 'string' && args.outputDir.trim()) {
+      outputDir = this.toAbsolutePath(projectPath, args.outputDir);
+    } else {
+      outputDir = join(projectPath, 'portal_exports');
+    }
+
+    mkdirSync(outputDir, { recursive: true });
+
+    try {
+      const { stdout, stderr, exitCode } = await this.runPythonScript(converterScript, [
+        sceneFile,
+        fbExportDataPath,
+        outputDir,
+      ]);
+
+      if (exitCode !== 0) {
+        return this.createErrorResponse(
+          `Portal export script failed with exit code ${exitCode}`,
+          [
+            'Inspect the stdout/stderr output for details',
+            'Verify the scene and FbExportData paths are correct',
+          ]
+        );
+      }
+
+      const trimmedStdout = stdout.trim();
+      const trimmedStderr = stderr.trim();
+      const lines = trimmedStdout.split(/\r?\n/).filter((line) => line.trim().length > 0);
+      const exportedFile = lines.length > 0 ? normalize(lines[lines.length - 1]) : null;
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                sceneFile: normalize(sceneFile),
+                fbExportDataPath,
+                outputDir: normalize(outputDir),
+                exportedFile,
+                stdout: trimmedStdout,
+                stderr: trimmedStderr,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return this.createErrorResponse(
+        `Failed to export Portal level: ${message}`,
+        [
+          'Ensure Python 3 is installed and accessible',
+          'Verify the Battlefield Portal SDK gdconverter dependencies are installed',
+        ]
+      );
+    }
+  }
+
+  /**
+   * Rebuild the Battlefield Portal Godot project from FbExportData assets
+   */
+  private async handleCreatePortalProject(args: any) {
+    args = this.normalizeParameters(args);
+
+    this.detectPortalPaths();
+
+    const fbExportDataPath =
+      typeof args.fbExportDataPath === 'string' && args.fbExportDataPath.trim()
+        ? normalize(args.fbExportDataPath)
+        : this.fbExportDataPath;
+
+    if (!fbExportDataPath || !existsSync(fbExportDataPath)) {
+      return this.createErrorResponse(
+        'FbExportData path not found',
+        [
+          'Install or extract the Battlefield Portal SDK assets',
+          'Provide fbExportDataPath pointing to SDK/deps/FbExportData',
+        ]
+      );
+    }
+
+    let outputDir: string;
+    if (typeof args.outputDir === 'string' && args.outputDir.trim()) {
+      outputDir = normalize(args.outputDir);
+    } else if (this.portalProjectPath) {
+      outputDir = this.portalProjectPath;
+    } else if (this.portalSdkPath) {
+      outputDir = normalize(join(this.portalSdkPath, 'GodotProject'));
+    } else {
+      outputDir = normalize(join(process.cwd(), 'PortalGodotProject'));
+    }
+
+    mkdirSync(outputDir, { recursive: true });
+
+    const converterScript = this.getGdConverterScriptPath('create_godot.py');
+    if (!converterScript) {
+      return this.createErrorResponse(
+        'Could not locate create_godot.py in the Battlefield Portal SDK',
+        [
+          'Verify the Portal SDK repository is available',
+          'Set PORTAL_SDK_PATH to the SDK root',
+        ]
+      );
+    }
+
+    const scriptArgs = [fbExportDataPath, outputDir];
+    if (args.overwriteLevels === true) {
+      scriptArgs.push('--overwrite-levels');
+    }
+
+    try {
+      const { stdout, stderr, exitCode } = await this.runPythonScript(converterScript, scriptArgs);
+
+      if (exitCode !== 0) {
+        return this.createErrorResponse(
+          `Portal project generation failed with exit code ${exitCode}`,
+          [
+            'Inspect the stdout/stderr output for details',
+            'Ensure Python dependencies from SDK/requirements.txt are installed',
+          ]
+        );
+      }
+
+      const trimmedStdout = stdout.trim();
+      const trimmedStderr = stderr.trim();
+
+      this.portalProjectPath = normalize(outputDir);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                projectPath: this.portalProjectPath,
+                fbExportDataPath,
+                stdout: trimmedStdout,
+                stderr: trimmedStderr,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return this.createErrorResponse(
+        `Failed to regenerate the Portal project: ${message}`,
+        [
+          'Ensure Python 3 is installed and accessible',
+          'Verify the Battlefield Portal SDK dependencies are installed',
         ]
       );
     }

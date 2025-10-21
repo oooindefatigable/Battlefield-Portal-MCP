@@ -1,5 +1,5 @@
 
-# Godot MCP
+# Battlefield Portal MCP
 
 [![Github-sponsors](https://img.shields.io/badge/sponsor-30363D?style=for-the-badge&logo=GitHub-Sponsors&logoColor=#EA4AAA)](https://github.com/sponsors/Coding-Solo)
 
@@ -53,18 +53,20 @@
                          |__/     |__/ \______/ |__/       
 ```
 
-A Model Context Protocol (MCP) server for interacting with the Godot game engine.
+A Model Context Protocol (MCP) server for interacting with the Battlefield Portal SDK and the Godot game engine.
 
 ## Introduction
 
-Godot MCP enables AI assistants to launch the Godot editor, run projects, capture debug output, and control project execution - all through a standardized interface.
+Battlefield Portal MCP extends the original Godot-focused tooling to understand the Battlefield Portal SDK. It enables AI assistants to launch the Godot editor, run projects, export Portal spatial data, regenerate Portal projects, capture debug output, and control project execution — all through a standardized interface.
 
-This direct feedback loop helps AI assistants like Claude understand what works and what doesn't in real Godot projects, leading to better code generation and debugging assistance.
+This direct feedback loop helps AI assistants like Claude understand what works and what doesn't in real Godot and Battlefield Portal projects, leading to better code generation, data conversion, and debugging assistance.
 
 ## Features
 
+### Godot Automation
+
 - **Launch Godot Editor**: Open the Godot editor for a specific project
-- **Run Godot Projects**: Execute Godot projects in debug mode
+- **Run Godot Projects**: Execute projects in debug mode and stream output
 - **Capture Debug Output**: Retrieve console output and error messages
 - **Control Execution**: Start and stop Godot projects programmatically
 - **Get Godot Version**: Retrieve the installed Godot version
@@ -80,9 +82,18 @@ This direct feedback loop helps AI assistants like Claude understand what works 
   - Get UID for specific files
   - Update UID references by resaving resources
 
+### Battlefield Portal Enhancements
+
+- **SDK Introspection**: Use `get_portal_sdk_info` to review detected Portal SDK, project, and FbExportData paths
+- **Level Discovery**: Enumerate available Portal spatial levels with `list_portal_levels`
+- **Spatial Export**: Convert Godot scenes to `.spatial.json` files using `export_portal_level`
+- **Project Generation**: Recreate or refresh the Portal Godot project from FbExportData via `create_portal_project`
+
 ## Requirements
 
 - [Godot Engine](https://godotengine.org/download) installed on your system
+- [Battlefield Portal SDK](https://github.com/battlefield-portal-community/PortalSDK) cloned locally for Portal tooling
+- [Python 3.9+](https://www.python.org/downloads/) available on your PATH (required for Portal converters)
 - Node.js and npm
 - An AI assistant that supports MCP (Cline, Cursor, etc.)
 
@@ -93,8 +104,8 @@ This direct feedback loop helps AI assistants like Claude understand what works 
 First, clone the repository and build the MCP server:
 
 ```bash
-git clone https://github.com/Coding-Solo/godot-mcp.git
-cd godot-mcp
+git clone https://github.com/Coding-Solo/godot-mcp.git bfportal-mcp
+cd bfportal-mcp
 npm install
 npm run build
 ```
@@ -108,9 +119,9 @@ Add to your Cline MCP settings file (`~/Library/Application Support/Code/User/gl
 ```json
 {
   "mcpServers": {
-    "godot": {
+    "bfportal": {
       "command": "node",
-      "args": ["/absolute/path/to/godot-mcp/build/index.js"],
+      "args": ["/absolute/path/to/bfportal-mcp/build/index.js"],
       "env": {
         "DEBUG": "true"                  // Optional: Enable detailed logging
       },
@@ -129,7 +140,11 @@ Add to your Cline MCP settings file (`~/Library/Application Support/Code/User/gl
         "export_mesh_library",
         "save_scene",
         "get_uid",
-        "update_project_uids"
+        "update_project_uids",
+        "get_portal_sdk_info",
+        "list_portal_levels",
+        "export_portal_level",
+        "create_portal_project"
       ]
     }
   }
@@ -143,9 +158,9 @@ Add to your Cline MCP settings file (`~/Library/Application Support/Code/User/gl
 1. Go to **Cursor Settings** > **Features** > **MCP**
 2. Click on the **+ Add New MCP Server** button
 3. Fill out the form:
-   - Name: `godot` (or any name you prefer)
+   - Name: `bfportal` (or any name you prefer)
    - Type: `command`
-   - Command: `node /absolute/path/to/godot-mcp/build/index.js`
+   - Command: `node /absolute/path/to/bfportal-mcp/build/index.js`
 4. Click "Add"
 5. You may need to press the refresh button in the top right corner of the MCP server card to populate the tool list
 
@@ -156,9 +171,9 @@ Create a file at `.cursor/mcp.json` in your project directory with the following
 ```json
 {
   "mcpServers": {
-    "godot": {
+    "bfportal": {
       "command": "node",
-      "args": ["/absolute/path/to/godot-mcp/build/index.js"],
+      "args": ["/absolute/path/to/bfportal-mcp/build/index.js"],
       "env": {
         "DEBUG": "true"                  // Enable detailed logging
       }
@@ -172,7 +187,28 @@ Create a file at `.cursor/mcp.json` in your project directory with the following
 You can customize the server behavior with these environment variables:
 
 - `GODOT_PATH`: Path to the Godot executable (overrides automatic detection)
+- `PORTAL_SDK_PATH`: Absolute path to the Battlefield Portal SDK root directory
+- `PORTAL_PROJECT_PATH`: Override the detected Portal Godot project directory
+- `PORTAL_FB_EXPORT_PATH`: Override the detected `SDK/deps/FbExportData` directory
+- `PYTHON_PATH`: Explicit Python interpreter to use for gdconverter scripts
 - `DEBUG`: Set to "true" to enable detailed server-side debug logging
+
+## Battlefield Portal Integration
+
+When the Portal SDK is available the server will automatically detect:
+
+- The SDK root directory and gdconverter utilities
+- The bundled Portal Godot project (`GodotProject`)
+- The exported spatial data (`SDK/deps/FbExportData`)
+
+The following tools extend the baseline Godot automation:
+
+- `get_portal_sdk_info`: Report detected Portal paths and Python command
+- `list_portal_levels`: Enumerate available `.spatial.json` files with related Godot scenes and script directories
+- `export_portal_level`: Convert a Godot scene into a Portal `.spatial.json` using the gdconverter export pipeline
+- `create_portal_project`: Regenerate the Portal Godot project from FbExportData, optionally overwriting existing levels
+
+If the SDK is stored outside the repository, set `PORTAL_SDK_PATH` (and friends) so the server can find it. Python 3.9 or newer must be available for the converter scripts.
 
 ## Example Prompts
 
@@ -199,6 +235,12 @@ Once configured, your AI assistant will automatically run the MCP server when ne
 
 "Create a UI scene with buttons and labels for my game's main menu"
 
+"List all Battlefield Portal levels and show their associated terrain scenes"
+
+"Export the MP_Aftermath scene to a spatial JSON file inside ./exports"
+
+"Regenerate the Portal Godot project from the FbExportData directory"
+
 "Get the UID for a specific script file in my Godot 4.4 project"
 
 "Update UID references in my Godot project after upgrading to 4.4"
@@ -208,7 +250,7 @@ Once configured, your AI assistant will automatically run the MCP server when ne
 
 ### Architecture
 
-The Godot MCP server uses a bundled GDScript approach for complex operations:
+The Battlefield Portal MCP server uses a bundled GDScript approach for complex operations:
 
 1. **Direct Commands**: Simple operations like launching the editor or getting project info use Godot's built-in CLI commands directly.
 2. **Bundled Operations Script**: Complex operations like creating scenes or adding nodes use a single, comprehensive GDScript file (`godot_operations.gd`) that handles all operations.
