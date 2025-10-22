@@ -45,7 +45,7 @@ By participating in this project, you agree to maintain a respectful and inclusi
 ### Project Structure
 
 ```
-battlefield6-portal-mcp-server/
+Battlefield-Portal-MCP/
 ├── README.md         # Project overview
 └── godot-mcp/
     ├── src/          # Source code
