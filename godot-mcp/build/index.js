@@ -28,6 +28,7 @@ const __dirname = dirname(__filename);
  */
 class GodotServer {
     server;
+    debugMode = DEBUG_MODE;
     activeProcess = null;
     godotPath = null;
     operationsScriptPath;
@@ -111,12 +112,13 @@ class GodotServer {
                 this.logDebug(`Custom Python command provided: ${this.pythonCommand}`);
             }
         }
+        // Persist the effective debug mode for other helpers
+        this.debugMode = debugMode;
         // Attempt to resolve Portal SDK paths immediately so defaults are available
         this.detectPortalPaths();
         // Set the path to the operations script
         this.operationsScriptPath = join(__dirname, 'scripts', 'godot_operations.gd');
-        if (debugMode)
-            console.debug(`[DEBUG] Operations script path: ${this.operationsScriptPath}`);
+        this.logDebug(`Operations script path: ${this.operationsScriptPath}`);
         // Initialize the MCP server
         this.server = new Server({
             name: 'bf6-portal-mcp-server',
@@ -140,8 +142,8 @@ class GodotServer {
      * Log debug messages if debug mode is enabled
      */
     logDebug(message) {
-        if (DEBUG_MODE) {
-            console.debug(`[DEBUG] ${message}`);
+        if (this.debugMode) {
+            console.error(`[DEBUG] ${message}`);
         }
     }
     /**
@@ -2465,7 +2467,7 @@ class GodotServer {
                     console.warn('[SERVER] This fallback behavior will be removed in a future version. Set strictPathValidation: true to opt-in to the new behavior.');
                 }
             }
-            console.log(`[SERVER] Using Godot at: ${this.godotPath}`);
+            console.error(`[SERVER] Using Godot at: ${this.godotPath}`);
             const transport = new StdioServerTransport();
             await this.server.connect(transport);
             console.error('Battlefield 6 Portal MCP server running on stdio');

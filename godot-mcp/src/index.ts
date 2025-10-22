@@ -69,6 +69,7 @@ interface OperationParams {
  */
 class GodotServer {
   private server: Server;
+  private debugMode: boolean = DEBUG_MODE;
   private activeProcess: GodotProcess | null = null;
   private godotPath: string | null = null;
   private operationsScriptPath: string;
@@ -159,12 +160,15 @@ class GodotServer {
       }
     }
 
+    // Persist the effective debug mode for other helpers
+    this.debugMode = debugMode;
+
     // Attempt to resolve Portal SDK paths immediately so defaults are available
     this.detectPortalPaths();
 
     // Set the path to the operations script
     this.operationsScriptPath = join(__dirname, 'scripts', 'godot_operations.gd');
-    if (debugMode) console.debug(`[DEBUG] Operations script path: ${this.operationsScriptPath}`);
+    this.logDebug(`Operations script path: ${this.operationsScriptPath}`);
 
     // Initialize the MCP server
     this.server = new Server(
@@ -196,8 +200,8 @@ class GodotServer {
    * Log debug messages if debug mode is enabled
    */
   private logDebug(message: string): void {
-    if (DEBUG_MODE) {
-      console.debug(`[DEBUG] ${message}`);
+    if (this.debugMode) {
+      console.error(`[DEBUG] ${message}`);
     }
   }
 
@@ -3109,7 +3113,7 @@ class GodotServer {
         }
       }
 
-      console.log(`[SERVER] Using Godot at: ${this.godotPath}`);
+      console.error(`[SERVER] Using Godot at: ${this.godotPath}`);
 
       const transport = new StdioServerTransport();
       await this.server.connect(transport);
