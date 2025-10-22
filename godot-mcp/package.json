@@ -1,10 +1,10 @@
 {
-  "name": "godot-mcp",
-  "version": "0.1.0",
-  "description": "MCP server for interfacing with Godot game engine. Provides tools for launching the editor, running projects, and capturing debug output.",
+  "name": "bf6-portal-mcp-server",
+  "version": "0.2.0",
+  "description": "Battlefield 6 Portal MCP Server for automating Godot and Battlefield Portal SDK workflows, including editor launch, spatial exports, and rich debug feedback.",
   "type": "module",
   "bin": {
-    "godot-mcp": "./build/index.js"
+    "bf6-portal-mcp": "./build/index.js"
   },
   "files": [
     "build"
@@ -27,10 +27,13 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Coding-Solo/godot-mcp.git"
+    "url": "https://github.com/battlefield-portal-community/battlefield6-portal-mcp-server.git"
   },
   "keywords": [
     "godot",
+    "battlefield",
+    "battlefield6",
+    "portal",
     "mcp",
     "ai",
     "claude",
