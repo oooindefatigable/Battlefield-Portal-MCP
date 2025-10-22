@@ -163,12 +163,50 @@ repositorio en otra carpeta.
 
 ### Optional Environment Variables
 
+The MCP server inspects the following environment variables. Configure them when
+auto-detection does not locate your local installations:
+
 - `GODOT_PATH`: Absolute path to the Godot executable
 - `PORTAL_SDK_PATH`: Battlefield Portal SDK root directory
 - `PORTAL_PROJECT_PATH`: Override the detected Portal Godot project
 - `PORTAL_FB_EXPORT_PATH`: Override `SDK/deps/FbExportData`
 - `PYTHON_PATH`: Specify a Python interpreter for gdconverter
-- `DEBUG`: Set to `true` for verbose server logging
+- `DEBUG`: Set to `true` for verbose server logging to stderr
+
+#### Windows (PowerShell)
+
+```powershell
+# Current session only
+$env:GODOT_PATH = "C:\\Program Files\\Godot\\Godot.exe"
+$env:PORTAL_SDK_PATH = "C:\\SDKs\\PortalSDK"
+$env:PORTAL_PROJECT_PATH = "C:\\SDKs\\PortalSDK\\GodotProject"
+$env:PORTAL_FB_EXPORT_PATH = "C:\\SDKs\\PortalSDK\\SDK\\deps\\FbExportData"
+$env:PYTHON_PATH = "C:\\Users\\<your-user>\\AppData\\Local\\Programs\\Python\\Python313\\python.exe"
+$env:DEBUG = "true"
+
+# Persist between sessions
+setx GODOT_PATH "C:\\Program Files\\Godot\\Godot.exe"
+setx PORTAL_SDK_PATH "C:\\SDKs\\PortalSDK"
+setx PORTAL_PROJECT_PATH "C:\\SDKs\\PortalSDK\\GodotProject"
+setx PORTAL_FB_EXPORT_PATH "C:\\SDKs\\PortalSDK\\SDK\\deps\\FbExportData"
+setx PYTHON_PATH "C:\\Users\\<your-user>\\AppData\\Local\\Programs\\Python\\Python313\\python.exe"
+setx DEBUG "true"
+```
+
+> Reinicia Claude Desktop o tu terminal para que los cambios permanentes surtan efecto.
+
+#### macOS / Linux (bash, zsh)
+
+```bash
+export GODOT_PATH="/Applications/Godot.app/Contents/MacOS/Godot"
+export PORTAL_SDK_PATH="$HOME/PortalSDK"
+export PORTAL_PROJECT_PATH="$HOME/PortalSDK/GodotProject"
+export PORTAL_FB_EXPORT_PATH="$HOME/PortalSDK/SDK/deps/FbExportData"
+export PYTHON_PATH="$(which python3)"
+export DEBUG="true"
+
+# Opcional: añade estas líneas a ~/.bashrc o ~/.zshrc para que sean permanentes
+```
 
 ## Battlefield Portal SDK Integration
 
