@@ -24,7 +24,7 @@ const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 /**
- * Main server class for the Godot MCP server
+ * Main server class for the Battlefield 6 Portal MCP server
  */
 class GodotServer {
     server;
@@ -2468,7 +2468,7 @@ class GodotServer {
             console.log(`[SERVER] Using Godot at: ${this.godotPath}`);
             const transport = new StdioServerTransport();
             await this.server.connect(transport);
-            console.error('Godot MCP server running on stdio');
+            console.error('Battlefield 6 Portal MCP server running on stdio');
         }
         catch (error) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
