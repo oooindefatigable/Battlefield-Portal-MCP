@@ -35,8 +35,8 @@ This server extends the original Godot automation stack to understand the Battle
 ### Clone and Build
 
 ```bash
-git clone https://github.com/battlefield-portal-community/battlefield6-portal-mcp-server.git
-cd battlefield6-portal-mcp-server/godot-mcp
+git clone https://github.com/oooindefatigable/Battlefield-Portal-MCP.git
+cd Battlefield-Portal-MCP/godot-mcp
 npm install
 npm run build
 ```
@@ -51,11 +51,54 @@ Add the server to `~/Library/Application Support/Code/User/globalStorage/saoudri
   "mcpServers": {
     "bf6portal": {
       "command": "node",
-      "args": ["/absolute/path/to/battlefield6-portal-mcp-server/godot-mcp/build/index.js"],
+      "args": ["/absolute/path/to/Battlefield-Portal-MCP/godot-mcp/build/index.js"],
       "env": {
         "DEBUG": "true"
       },
       "disabled": false,
+      "autoApprove": [
+        "launch_editor",
+        "run_project",
+        "get_debug_output",
+        "stop_project",
+        "get_godot_version",
+        "list_projects",
+        "get_project_info",
+        "create_scene",
+        "add_node",
+        "load_sprite",
+        "export_mesh_library",
+        "save_scene",
+        "get_uid",
+        "update_project_uids",
+        "get_portal_sdk_info",
+        "list_portal_levels",
+        "export_portal_level",
+        "create_portal_project"
+      ]
+    }
+  }
+}
+```
+
+#### Claude Desktop
+
+Add the server to your Claude Desktop configuration file (typically located at
+`%AppData%\Claude\claude_desktop_config.json` on Windows). Replace
+`<your-user>` with your Windows username if you installed the repository under
+`C:\\Users\\<your-user>\\Documents\\MCP\\Battlefield-Portal-MCP-main\\Battlefield-Portal-MCP-main`:
+
+```json
+{
+  "mcpServers": {
+    "bf6portal": {
+      "command": "node",
+      "args": [
+        "C:\\Users\\<your-user>\\Documents\\MCP\\Battlefield-Portal-MCP-main\\Battlefield-Portal-MCP-main\\godot-mcp\\build\\index.js"
+      ],
+      "env": {
+        "DEBUG": "true"
+      },
       "autoApprove": [
         "launch_editor",
         "run_project",
@@ -87,7 +130,7 @@ Add the server to `~/Library/Application Support/Code/User/globalStorage/saoudri
 2. Click **+ Add New MCP Server**
 3. Set **Name** to `bf6portal`
 4. Set **Type** to `command`
-5. Set **Command** to `node /absolute/path/to/battlefield6-portal-mcp-server/godot-mcp/build/index.js`
+5. Set **Command** to `node /absolute/path/to/Battlefield-Portal-MCP/godot-mcp/build/index.js`
 6. Save and refresh the MCP server card
 
 For project-scoped setup, create `.cursor/mcp.json` inside your workspace:
@@ -97,7 +140,7 @@ For project-scoped setup, create `.cursor/mcp.json` inside your workspace:
   "mcpServers": {
     "bf6portal": {
       "command": "node",
-      "args": ["/absolute/path/to/battlefield6-portal-mcp-server/godot-mcp/build/index.js"],
+      "args": ["/absolute/path/to/Battlefield-Portal-MCP/godot-mcp/build/index.js"],
       "env": {
         "DEBUG": "true"
       }
@@ -105,6 +148,18 @@ For project-scoped setup, create `.cursor/mcp.json` inside your workspace:
   }
 }
 ```
+
+#### Ejecutar el servidor manualmente en Windows
+
+Para verificar que la compilación funcione de forma independiente, abre PowerShell
+o el Símbolo del sistema y ejecuta:
+
+```powershell
+node "C:\Users\<your-user>\Documents\MCP\Battlefield-Portal-MCP-main\Battlefield-Portal-MCP-main\godot-mcp\build\index.js"
+```
+
+Reemplaza `<your-user>` por tu usuario de Windows y ajusta la ruta si clonaste el
+repositorio en otra carpeta.
 
 ### Optional Environment Variables
 
